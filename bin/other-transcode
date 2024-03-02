@@ -305,15 +305,18 @@ Fraunhofer FDK AAC audio encoder options:
       <<-HERE
 
 Subtitle options:
-    --add-subtitle TRACK[=forced]|auto|all|LANGUAGE|STRING
+    --add-subtitle TRACK[=forced]|auto|all[=forced]|LANGUAGE[=forced]|STRING[=forced]
                     add single subtitle track by number
                       optionally setting forced disposition
                     or enable automatic addition of forced subtitle
                     or add all subtitle tracks
+                      optionally setting forced disposition
                     or subtitle tracks by language code
                       (in ISO 639-2 format, e.g.: `eng`)
+                      optionally setting forced disposition
                     or subtitle tracks with titles containing string
                       (comparison is case-insensitve)
+                      optionally setting forced disposition
                     (variations exclude any burned track)
     --burn-subtitle TRACK|auto
                     burn subtitle track by number into video
@@ -970,15 +973,17 @@ Requires `ffprobe`, `ffmpeg` and `mkvpropedit`.
       end
 
       opts.on '--add-subtitle ARG' do |arg|
-        if arg =~ /^([0-9]+)(?:=(forced))?$|^(auto)$|^([a-z]{3})$|^(.*)$/
+        if arg =~ /^([0-9]+)(?:=(forced))?$|^(auto)$|^([a-z]{3})(?:=(forced))?$|^(.*)(?:=(forced))?$/
+          @set_forced_flag = $2.nil? and $5.nil? and $7.nil ? false : true
+
           @subtitle_selections += [{
             :track => $1.to_i,
-            :forced => $2.nil? ? false : true,
+            :forced => @set_forced_flag,
             :language => $4,
-            :title => $5
+            :title => $6
           }]
 
-          @auto_add_subtitle = false unless $2.nil?
+          @auto_add_subtitle = false unless !@set_forced_flag
           @auto_add_subtitle = true unless $3.nil?
         else
           fail UsageError, "invalid add subtitle argument: #{arg}"
@@ -2197,14 +2202,14 @@ Requires `ffprobe`, `ffmpeg` and `mkvpropedit`.
     def get_subtitle_options(media_info, burn_subtitle)
       return ['-sn'] if @subtitle_selections.empty?
 
-      force_subtitle = nil
+      force_subtitles = []
 
       if @auto_add_subtitle
         media_info['streams'].each do |stream|
           next if stream['codec_type'] != 'subtitle'
 
           if stream['disposition']['forced'] == 1
-            force_subtitle = stream
+            force_subtitles += [stream]
             break
           end
         end
@@ -2222,8 +2227,8 @@ Requires `ffprobe`, `ffmpeg` and `mkvpropedit`.
             track += 1
 
             if track == selection[:track]
-              if selection[:forced] and force_subtitle.nil?
-                force_subtitle = stream
+              if selection[:forced]
+                force_subtitles += [stream]
               else
                 subtitles += [stream]
               end
@@ -2239,7 +2244,11 @@ Requires `ffprobe`, `ffmpeg` and `mkvpropedit`.
 
             if (selection[:language] == 'all' or
                 stream.fetch('tags', {}).fetch('language', '') == selection[:language])
-              subtitles += [stream]
+              if selection[:forced]
+                force_subtitles += [stream]
+              else
+                subtitles += [stream]
+              end
             end
           end
         end
@@ -2249,13 +2258,18 @@ Requires `ffprobe`, `ffmpeg` and `mkvpropedit`.
             next if stream['codec_type'] != 'subtitle'
 
             if stream.fetch('tags', {}).fetch('title', '') =~ /#{selection[:title]}/i
-              subtitles += [stream]
+              if selection[:forced]
+                force_subtitles += [stream]
+              else
+                subtitles += [stream]
+              end
             end
           end
         end
       end
 
-      subtitles = [force_subtitle] + subtitles unless force_subtitle.nil?
+      force_subtitles.uniq!
+      subtitles = force_subtitles + subtitles
       subtitles.uniq!
       options = []
       index = 0
@@ -2263,7 +2277,7 @@ Requires `ffprobe`, `ffmpeg` and `mkvpropedit`.
       subtitles.each do |subtitle|
         next if (not burn_subtitle.nil?) and burn_subtitle['index'] == subtitle['index']
 
-        force = (index == 0 and not force_subtitle.nil?)
+        force = force_subtitles.include?(subtitle)
         text = "#{sprintf("%2d", subtitle['index'])} = #{subtitle['codec_name']}"
         text += ' / force' if force
         title = subtitle.fetch('tags', {}).fetch('title', '')
@@ -2273,7 +2287,7 @@ Requires `ffprobe`, `ffmpeg` and `mkvpropedit`.
         options += [
           '-map', "0:#{subtitle['index']}",
           "-c:s:#{index}", ((@format == :mp4 and subtitle['codec_name'] == 'subrip') ? 'mov_text' : 'copy'),
-          "-disposition:s:#{index}", (force ? 'default+forced' : '0')
+          "-disposition:s:#{index}", (force ? 'forced' : '0')
         ]
 
         index += 1
